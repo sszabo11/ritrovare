@@ -8,6 +8,12 @@ pub struct LocalDB {
 }
 
 const PLACES_PATH: &str = "Downloads/0qh2f0lc.Default (alpha)/places.sqlite";
+
+struct TabVector {
+    id: i32,
+    embedding: Vec<f32>,
+}
+
 impl LocalDB {
     pub fn new() -> Self {
         let conn = Connection::open("local.sqlite").unwrap();
@@ -119,6 +125,42 @@ impl LocalDB {
         )?;
         Ok(())
     }
+
+    pub async fn search_by_vector(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(i32, f32)>> {
+        let mut stmt = self
+            .api
+            .prepare("SELECT id, embedding FROM Tabs WHERE embedding IS NOT NULL")?;
+
+        let rows = stmt.query_map([], |row| {
+            let embedding_bytes: Vec<u8> = row.get("embedding")?;
+            let embedding: Vec<f32> = embedding_bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+
+            Ok(TabVector {
+                id: row.get("id")?,
+                embedding,
+            })
+        })?;
+
+        let mut results: Vec<(i32, f32)> = rows
+            .filter_map(|row| row.ok())
+            .map(|row| {
+                let score = cosine_similarity(&row.embedding, query_embedding);
+                (row.id, score)
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        results.truncate(limit);
+        Ok(results)
+    }
+
     pub fn save_new_tabs(&mut self, embeddings: &Vec<Vec<f32>>, tabs: &Vec<Tab>) -> Result<()> {
         let tx = self.api.unchecked_transaction()?;
         for (i, tab) in tabs.iter().enumerate() {
@@ -127,4 +169,11 @@ impl LocalDB {
         tx.commit()?;
         Ok(())
     }
+}
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    dot / (mag_a * mag_b)
 }
