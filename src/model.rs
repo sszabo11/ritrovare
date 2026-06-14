@@ -9,7 +9,7 @@ use ollama_rs::{
 };
 use url::Url;
 
-use crate::browser::Tab;
+use crate::{browser::Tab, screen::QueryPayload};
 
 pub struct Model {
     name: String,
@@ -22,6 +22,12 @@ impl Model {
             ollama: Ollama::default(),
             name: name.to_string(),
         }
+    }
+
+    pub async fn search(&self, query: String) -> Result<QueryPayload> {
+        Ok(QueryPayload {
+            query: "".to_string(),
+        })
     }
 
     pub async fn send_message(

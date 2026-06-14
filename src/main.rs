@@ -1,5 +1,8 @@
 use anyhow::Result;
-use tabby::{browser::Browser, local::LocalDB, model::Model, screen::Screen, utils::filter_tabs};
+use tabby::{
+    browser::Browser, local::LocalDB, model::Model, screen::Screen, spinners::Spinner,
+    utils::filter_tabs,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
