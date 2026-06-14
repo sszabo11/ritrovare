@@ -22,11 +22,9 @@ pub struct Screen {
     screen_height: u16,
     screen_width: u16,
     input: String,
+    output: SearchResult,
     prompt_state: PromptState,
     spinner: SpinnerDots,
-    query_tx: Sender<QueryPayload>,
-    query_rx: Receiver<QueryPayload>,
-    model: Model,
 }
 
 #[derive(Debug)]
@@ -43,24 +41,28 @@ pub enum Action {
 }
 
 #[derive(Debug)]
-pub struct QueryPayload {
-    pub query: String,
+pub struct SearchResult {
+    pub content: String,
+}
+impl Default for SearchResult {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+        }
+    }
 }
 
 impl Screen {
     pub fn new() -> Self {
         let (cols, rows) = size().expect("Failed to read size");
-        let (tx, mut rx) = mpsc::channel::<QueryPayload>(100);
 
         Self {
             screen_height: rows,
             screen_width: cols,
             input: String::new(),
+            output: SearchResult::default(),
             prompt_state: PromptState::None,
             spinner: SpinnerDots::new(),
-            query_tx: tx,
-            query_rx: rx,
-            model: Model::new("gemma4"),
         }
     }
 
@@ -70,11 +72,12 @@ impl Screen {
         execute!(stdout, EnterAlternateScreen)?;
         execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
 
+        let (tx, mut rx) = mpsc::channel::<SearchResult>(100);
         loop {
             self.render(&mut stdout)?;
             if event::poll(Duration::from_millis(80))? {
                 if let Event::Key(key) = event::read()? {
-                    match self.handle_events(key) {
+                    match self.handle_events(key, &tx) {
                         Action::Quit => {
                             break;
                         }
@@ -83,8 +86,9 @@ impl Screen {
                 }
             }
 
-            if let Ok(msg) = self.query_rx.try_recv() {
-                println!("Received {:?}", msg);
+            if let Ok(result) = rx.try_recv() {
+                self.prompt_state = PromptState::None;
+                self.output = result;
             } else {
                 eprintln!("Failed to receive message");
             }
@@ -129,10 +133,13 @@ impl Screen {
         Ok(())
     }
     fn draw_output(&self, stdout: &mut impl Write) -> Result<()> {
-        if !matches!(self.prompt_state, PromptState::Enter) {
-            return Ok(());
-        };
+        //if !matches!(self.prompt_state, PromptState::Enter) {
+        //    return Ok(());
+        //};
 
+        if !self.output.content.is_empty() {
+            queue!(stdout, cursor::MoveTo(5, 8), Print(&self.output.content))?;
+        }
         Ok(())
     }
 
@@ -165,7 +172,7 @@ impl Screen {
         Ok(())
     }
 
-    fn handle_events(&mut self, key: KeyEvent) -> Action {
+    fn handle_events(&mut self, key: KeyEvent, tx: &Sender<SearchResult>) -> Action {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 return Action::Quit;
@@ -176,11 +183,10 @@ impl Screen {
             KeyCode::Enter => {
                 self.prompt_state = PromptState::Enter;
                 let query = self.input.clone();
-                let tx = self.query_tx.clone();
+                let tx = tx.clone();
                 tokio::spawn(async move {
                     // DO LLM CALL
                     let result = run_search(query).await.unwrap();
-                    println!("ya: {:?}", result);
                     tx.send(result)
                         .await
                         .expect("Failed to send query response");
@@ -234,8 +240,10 @@ fn is_loading(state: &PromptState) -> bool {
     }
 }
 
-pub async fn run_search(query: String) -> Result<QueryPayload> {
-    Ok(QueryPayload {
-        query: "".to_string(),
-    })
+pub async fn run_search(query: String) -> Result<SearchResult> {
+    let model = Model::new("gemma4");
+
+    let result = model.search(query).await?;
+
+    Ok(result)
 }
