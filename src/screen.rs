@@ -20,7 +20,8 @@ use crossterm::{
     style::{Color, Print, PrintStyledContent, Stylize},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, size},
 };
-use termimad::MadSkin;
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
+use termimad::{Area, FmtText, MadSkin};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub struct Screen {
@@ -32,6 +33,10 @@ pub struct Screen {
     spinner: SpinnerDots,
 
     ui_offset: u16,
+
+    messages: Vec<ChatMessage>,
+
+    content_height: u16,
 }
 
 #[derive(Debug)]
@@ -71,6 +76,8 @@ impl Screen {
             prompt_state: PromptState::None,
             spinner: SpinnerDots::new(),
             ui_offset: 0,
+            messages: Vec::new(),
+            content_height: 0,
         }
     }
 
@@ -105,7 +112,12 @@ impl Screen {
             match rx.try_recv() {
                 Ok(result) => {
                     self.prompt_state = PromptState::None;
-                    self.output = result;
+                    self.messages
+                        .push(ChatMessage::new(MessageRole::User, self.input.to_string()));
+                    self.input.clear();
+                    self.messages
+                        .push(ChatMessage::new(MessageRole::Assistant, result.content));
+                    //self.output = result;
                 }
                 Err(err) => match err {
                     mpsc::error::TryRecvError::Empty => {}
@@ -137,7 +149,7 @@ impl Screen {
     }
 
     fn draw_input(&mut self, stdout: &mut impl Write) -> Result<()> {
-        let input_y = 6 + self.ui_offset;
+        let input_y = 6 + self.ui_offset + self.content_height;
 
         if is_loading(&self.prompt_state) {
             let frame = self.spinner.tick();
@@ -161,20 +173,40 @@ impl Screen {
         )?;
         Ok(())
     }
-    fn draw_output(&self, stdout: &mut impl Write) -> Result<()> {
+    fn draw_output(&mut self, stdout: &mut impl Write) -> Result<()> {
         //if !matches!(self.prompt_state, PromptState::Enter) {
         //    return Ok(());
         //};
 
         //let markdown = termimad::inline(&self.output.content);
-        if !self.output.content.is_empty() {
+        if !self.messages.is_empty() {
             let skin = MadSkin::default();
-            let rendered = skin.text(&self.output.content, None).to_string();
-            queue!(stdout, cursor::MoveTo(5, 8 + self.ui_offset))?;
+            let area = Area::new(0, 0, self.screen_width, self.screen_height);
 
-            for line in rendered.lines() {
-                queue!(stdout, Print(line), Print("\r\n"))?;
+            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
+            for msg in self.messages.iter() {
+                //match msg.role {
+                //    MessageRole::User => {}
+                //    MessageRole::Assistant => {}
+                //    _ => {}
+                //}
+                //let fmt_text = FmtText::from(&skin, &msg.content, Some(area.width as usize));
+                //let rendered = fmt_text.to_string();
+                //let rendered = skin
+                //    .text(&msg.content, Some(self.screen_width as usize))
+                //    .to_string();
+                let lines = render_markdown(&msg.content, self.screen_width as usize);
+                for line in &lines {
+                    queue!(stdout, Print(line), Print("\r\n"))?;
+                }
+                log::info!("content_heighT: {}", self.content_height);
             }
+            self.content_height = self
+                .messages
+                .iter()
+                .map(|m| render_markdown(&m.content, self.screen_width as usize).len() as u16)
+                .sum::<u16>()
+                + 1;
         }
         Ok(())
     }
@@ -340,4 +372,26 @@ fn format_timestamp(micros: i64) -> String {
     DateTime::from_timestamp(secs, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn render_markdown(text: &str, terminal_width: usize) -> Vec<String> {
+    let padding = 5;
+    let content_width = terminal_width.saturating_sub(padding * 2);
+    let mut skin = MadSkin::default();
+    skin.paragraph.left_margin = 0;
+    skin.paragraph.right_margin = 0;
+    for h in skin.headers.iter_mut() {
+        h.set_fg(crossterm::style::Color::Rgb {
+            r: 114,
+            g: 142,
+            b: 255,
+        });
+    }
+
+    let fmt_text = FmtText::from(&skin, text, Some(content_width));
+    fmt_text
+        .to_string()
+        .lines()
+        .map(|l| format!("{}{}", " ".repeat(padding), l))
+        .collect()
 }
