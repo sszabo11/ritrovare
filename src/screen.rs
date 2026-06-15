@@ -1,5 +1,5 @@
 use std::{
-    io::{Write, stdout},
+    io::{BufWriter, Write, stdout},
     time::Duration,
 };
 
@@ -12,11 +12,15 @@ use anyhow::Result;
 use crossterm::{
     QueueableCommand,
     cursor::{self, SetCursorStyle},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        MouseEvent, MouseEventKind,
+    },
     execute, queue,
     style::{Color, Print, PrintStyledContent, Stylize},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, size},
 };
+use termimad::MadSkin;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub struct Screen {
@@ -26,6 +30,8 @@ pub struct Screen {
     output: SearchResult,
     prompt_state: PromptState,
     spinner: SpinnerDots,
+
+    ui_offset: u16,
 }
 
 #[derive(Debug)]
@@ -64,26 +70,35 @@ impl Screen {
             output: SearchResult::default(),
             prompt_state: PromptState::None,
             spinner: SpinnerDots::new(),
+            ui_offset: 0,
         }
     }
 
     pub fn draw(&mut self) -> Result<()> {
         terminal::enable_raw_mode()?;
-        let mut stdout = stdout();
+        //let mut stdout = stdout();
+        let mut stdout = BufWriter::new(stdout());
         execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnableMouseCapture)?;
         execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
 
         let (tx, mut rx) = mpsc::channel::<SearchResult>(100);
         loop {
             self.render(&mut stdout)?;
             if event::poll(Duration::from_millis(80))? {
-                if let Event::Key(key) = event::read()? {
-                    match self.handle_events(key, &tx) {
+                let event = event::read()?;
+                //if let Event::Mouse(mouse) = event {
+                //    self.handle_mouse(mouse);
+                //}
+                match event {
+                    Event::Key(key) => match self.handle_key(key, &tx) {
                         Action::Quit => {
                             break;
                         }
                         Action::None => {}
-                    }
+                    },
+                    Event::Mouse(mouse) => self.handle_mouse(mouse),
+                    _ => {}
                 }
             }
 
@@ -102,11 +117,12 @@ impl Screen {
         }
         terminal::disable_raw_mode()?;
         execute!(stdout, LeaveAlternateScreen)?;
+        execute!(stdout, DisableMouseCapture)?;
         Ok(())
     }
 
     fn render(&mut self, stdout: &mut impl Write) -> Result<()> {
-        execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
+        queue!(stdout, terminal::Clear(terminal::ClearType::All))?;
 
         self.draw_title(stdout)?;
         self.draw_status_bar(stdout)?;
@@ -121,19 +137,25 @@ impl Screen {
     }
 
     fn draw_input(&mut self, stdout: &mut impl Write) -> Result<()> {
+        let input_y = 6 + self.ui_offset;
+
         if is_loading(&self.prompt_state) {
             let frame = self.spinner.tick();
-            queue!(stdout, cursor::MoveTo(2, 6), Print(format!("{}  ", frame)))?;
+            queue!(
+                stdout,
+                cursor::MoveTo(2, input_y),
+                Print(format!("{}  ", frame))
+            )?;
         } else {
             queue!(
                 stdout,
-                cursor::MoveTo(2, 6),
+                cursor::MoveTo(2, input_y),
                 Print(get_indicator(&self.prompt_state)),
             )?;
         }
         queue!(
             stdout,
-            cursor::MoveTo(5, 6),
+            cursor::MoveTo(5, input_y),
             SetCursorStyle::BlinkingBlock,
             Print(&self.input)
         )?;
@@ -144,8 +166,15 @@ impl Screen {
         //    return Ok(());
         //};
 
+        //let markdown = termimad::inline(&self.output.content);
         if !self.output.content.is_empty() {
-            queue!(stdout, cursor::MoveTo(5, 8), Print(&self.output.content))?;
+            let skin = MadSkin::default();
+            let rendered = skin.text(&self.output.content, None).to_string();
+            queue!(stdout, cursor::MoveTo(5, 8 + self.ui_offset))?;
+
+            for line in rendered.lines() {
+                queue!(stdout, Print(line), Print("\r\n"))?;
+            }
         }
         Ok(())
     }
@@ -179,7 +208,20 @@ impl Screen {
         Ok(())
     }
 
-    fn handle_events(&mut self, key: KeyEvent, tx: &Sender<SearchResult>) -> Action {
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.ui_offset += 2;
+                log::info!("mouse: {}", self.ui_offset);
+            }
+            MouseEventKind::ScrollDown => {
+                self.ui_offset = self.ui_offset.saturating_sub(2);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, tx: &Sender<SearchResult>) -> Action {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 return Action::Quit;
@@ -283,7 +325,10 @@ pub async fn run_search(query: String) -> Result<SearchResult> {
         .join("\n");
     log::info!("\nhistory txt: {}", history_txt);
 
-    let query_w_data = format!("User query: {}\nBrowsing history: {}\n", query, history_txt);
+    let query_w_data = format!(
+        "User query: '{}'\nBrowsing history: {}\n",
+        query, history_txt
+    );
     let result = model.search(&query_w_data).await?;
 
     Ok(result)

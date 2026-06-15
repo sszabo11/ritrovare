@@ -1,12 +1,27 @@
 use anyhow::Result;
+use crossterm::{
+    event::DisableMouseCapture,
+    execute,
+    terminal::{self, LeaveAlternateScreen},
+};
 use tabby::{
     browser::Browser, local::LocalDB, logs::init_logging, model::Model, screen::Screen,
     spinners::Spinner, utils::filter_tabs,
 };
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+    let _guard = TerminalGuard;
 
     let model = Model::new("gemma4");
 
