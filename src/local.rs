@@ -1,10 +1,11 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, Error};
 
 use crate::{browser::Tab, utils::parse_val_str};
 
 pub struct LocalDB {
-    api: Connection,
+    //api: Connection,
+    db_path: String,
 }
 
 const PLACES_PATH: &str = "Downloads/0qh2f0lc.Default (alpha)/places.sqlite";
@@ -16,9 +17,10 @@ struct TabVector {
 
 impl LocalDB {
     pub fn new() -> Self {
-        let conn = Connection::open("local.sqlite").unwrap();
+        let db_path = "local.sqlite".to_string();
+        //let conn = Connection::open(&db_path).unwrap();
 
-        Self { api: conn }
+        Self { db_path }
     }
     //pub id: i32,
     //pub url: String,
@@ -34,7 +36,8 @@ impl LocalDB {
     //pub scrolling_distance: i32,
 
     pub fn init_db(&self) -> Result<()> {
-        let res = self.api.execute(
+        let conn = Connection::open(&self.db_path)?;
+        let res = conn.execute(
             "
             CREATE TABLE IF NOT EXISTS tabs (
                 id                INTEGER PRIMARY KEY,
@@ -59,9 +62,8 @@ impl LocalDB {
     }
 
     pub fn last_saved_tab(&self) -> Result<Option<Tab>> {
-        let mut last = self
-            .api
-            .prepare("SELECT * FROM tabs ORDER BY id DESC LIMIT 1")?;
+        let conn = Connection::open(&self.db_path)?;
+        let mut last = conn.prepare("SELECT * FROM tabs ORDER BY id DESC LIMIT 1")?;
 
         let data = last.query_map([], |row| {
             Ok(Tab {
@@ -126,43 +128,86 @@ impl LocalDB {
         Ok(())
     }
 
-    pub async fn search_by_vector(
-        &self,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> Result<Vec<(i32, f32)>> {
-        let mut stmt = self
-            .api
-            .prepare("SELECT id, embedding FROM Tabs WHERE embedding IS NOT NULL")?;
+    pub async fn get_tabs_from_ids(&self, ids: Vec<i32>) -> Result<Vec<Tab>> {
+        let conn = Connection::open(&self.db_path)?;
 
-        let rows = stmt.query_map([], |row| {
-            let embedding_bytes: Vec<u8> = row.get("embedding")?;
-            let embedding: Vec<f32> = embedding_bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        //let ids_str: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        //println!("ids str: {}", ids_str.join(", "));
 
-            Ok(TabVector {
-                id: row.get("id")?,
-                embedding,
+        let query = format!(
+            "SELECT id, url, title, visit_count, last_visit_date, desc, created_at, updated_at, total_view_time, typing_time, scrolling_time, scrolling_distance FROM Tabs WHERE id IN ({});",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&query)?;
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+            Ok(Tab {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                title: parse_val_str(row.get(2)?),
+                visit_count: row.get(3)?,
+                last_visit_date: row.get(4)?,
+                desc: parse_val_str(row.get(5)?),
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                total_view_time: row.get(8)?,
+                typing_time: row.get(9)?,
+                scrolling_time: row.get(10)?,
+                scrolling_distance: row.get(11)?,
             })
         })?;
 
-        let mut results: Vec<(i32, f32)> = rows
-            .filter_map(|row| row.ok())
-            .map(|row| {
-                let score = cosine_similarity(&row.embedding, query_embedding);
-                (row.id, score)
-            })
-            .collect();
+        let results = rows.filter_map(|row| row.ok()).collect();
+        log::info!("tabs: {:?}", results);
+        Ok(results)
+    }
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        results.truncate(limit);
+    pub async fn search_by_vector(
+        &self,
+        query_embedding: Vec<f32>,
+        limit: usize,
+    ) -> Result<Vec<(i32, f32)>> {
+        let path = self.db_path.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(path)?;
+            let mut stmt = conn
+                .prepare("SELECT id, embedding FROM Tabs WHERE embedding IS NOT NULL")
+                .unwrap();
+
+            let rows = stmt.query_map([], |row| {
+                let embedding_bytes: Vec<u8> = row.get("embedding")?;
+                let embedding: Vec<f32> = embedding_bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+
+                Ok(TabVector {
+                    id: row.get("id")?,
+                    embedding,
+                })
+            })?;
+
+            let mut results: Vec<(i32, f32)> = rows
+                .filter_map(|row| row.ok())
+                .map(|row| {
+                    let score = cosine_similarity(&row.embedding, &query_embedding);
+                    (row.id, score)
+                })
+                .collect();
+
+            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            results.truncate(limit);
+            Ok::<Vec<(i32, f32)>, Error>(results)
+        })
+        .await?
+        .unwrap();
         Ok(results)
     }
 
     pub fn save_new_tabs(&mut self, embeddings: &Vec<Vec<f32>>, tabs: &Vec<Tab>) -> Result<()> {
-        let tx = self.api.unchecked_transaction()?;
+        let conn = Connection::open(&self.db_path)?;
+        let tx = conn.unchecked_transaction()?;
         for (i, tab) in tabs.iter().enumerate() {
             self.upsert_tab(&tx, tab, &embeddings[i])?;
         }

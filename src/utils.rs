@@ -27,7 +27,7 @@ pub fn is_url(url: &str) -> bool {
 
     let is_domain = parsed.domain().is_some();
     if !is_domain {
-        println!("Invalid domain")
+        log::info!("Invalid domain")
     }
     is_domain
 }

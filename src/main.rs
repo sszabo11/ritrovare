@@ -1,11 +1,13 @@
 use anyhow::Result;
 use tabby::{
-    browser::Browser, local::LocalDB, model::Model, screen::Screen, spinners::Spinner,
-    utils::filter_tabs,
+    browser::Browser, local::LocalDB, logs::init_logging, model::Model, screen::Screen,
+    spinners::Spinner, utils::filter_tabs,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
+
     let model = Model::new("gemma4");
 
     let mut browser = Browser::new();

@@ -77,7 +77,7 @@ impl Browser {
 
     pub fn fetch_latest(&mut self, last_tab: Option<Tab>) -> Result<Vec<Tab>> {
         let last_tab = last_tab.expect("No last tab, cannot fetch latest");
-        println!("last tab id: {}", last_tab.id);
+        log::info!("last tab id: {}", last_tab.id);
 
         let mut moz_places = self.api.prepare(
             "SELECT * FROM moz_places 

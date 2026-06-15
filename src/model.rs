@@ -24,10 +24,10 @@ impl Model {
         }
     }
 
-    pub async fn search(&self, query: String) -> Result<SearchResult> {
+    pub async fn search(&self, query: &str) -> Result<SearchResult> {
         let req = ChatMessageRequest::new(
             "gemma4".to_string(),
-            vec![ChatMessage::new(MessageRole::User, query)],
+            vec![ChatMessage::new(MessageRole::User, query.to_string())],
         );
 
         let response = self.send_message(req).await?;
@@ -45,12 +45,21 @@ impl Model {
         match self.ollama.send_chat_messages(request).await {
             Ok(data) => Ok(data),
             Err(err) => {
-                eprintln!("Error: {}", err);
+                log::info!("Error: {}", err);
                 Err(err)
             }
         }
     }
 
+    pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let input = EmbeddingsInput::Single(query.to_string());
+
+        let request = GenerateEmbeddingsRequest::new("embeddinggemma".to_string(), input);
+
+        let res = self.ollama.generate_embeddings(request).await?;
+
+        Ok(res.embeddings[0].clone())
+    }
     pub async fn embed_tabs(&self, tabs: &Vec<Tab>) -> Result<Vec<Vec<f32>>> {
         let text: Vec<String> = tabs
             .iter()
