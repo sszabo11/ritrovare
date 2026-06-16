@@ -9,6 +9,7 @@ use crate::{
     spinners::{Spinner, SpinnerDots},
 };
 use anyhow::Result;
+use colored::Colorize;
 use crossterm::{
     QueueableCommand,
     cursor::{self, SetCursorStyle},
@@ -20,6 +21,7 @@ use crossterm::{
     style::{Color, Print, PrintStyledContent, Stylize},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, size},
 };
+use log::info;
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use termimad::{Area, FmtText, MadSkin};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -37,6 +39,7 @@ pub struct Screen {
     messages: Vec<ChatMessage>,
 
     content_height: u16,
+    is_streaming: bool,
 }
 
 #[derive(Debug)]
@@ -50,6 +53,13 @@ pub enum PromptState {
 pub enum Action {
     None,
     Quit,
+}
+
+pub enum AppEvent {
+    Token(String),
+    Done,
+    SearchResult(SearchResult),
+    Error(String),
 }
 
 #[derive(Debug)]
@@ -78,6 +88,7 @@ impl Screen {
             ui_offset: 0,
             messages: Vec::new(),
             content_height: 0,
+            is_streaming: false,
         }
     }
 
@@ -89,7 +100,7 @@ impl Screen {
         execute!(stdout, EnableMouseCapture)?;
         execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
 
-        let (tx, mut rx) = mpsc::channel::<SearchResult>(100);
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(100);
         loop {
             self.render(&mut stdout)?;
             if event::poll(Duration::from_millis(80))? {
@@ -110,19 +121,30 @@ impl Screen {
             }
 
             match rx.try_recv() {
-                Ok(result) => {
-                    self.prompt_state = PromptState::None;
-                    self.messages
-                        .push(ChatMessage::new(MessageRole::User, self.input.to_string()));
-                    self.input.clear();
-                    self.messages
-                        .push(ChatMessage::new(MessageRole::Assistant, result.content));
-                    //self.output = result;
-                }
+                // if is_streaming doesnt work, add evebt START here:
+                Ok(event) => match event {
+                    AppEvent::Token(token) => {
+                        self.output.content.push_str(&token);
+                    }
+                    AppEvent::SearchResult(result) => {
+                        self.prompt_state = PromptState::None;
+                        self.messages
+                            .push(ChatMessage::new(MessageRole::User, self.input.to_string()));
+                        self.input.clear();
+                        self.messages
+                            .push(ChatMessage::new(MessageRole::Assistant, result.content));
+                        self.output.content.clear();
+                        self.is_streaming = false;
+                    }
+                    AppEvent::Error(err) => {
+                        log::error!("Error receiving stream content: {}", err)
+                    }
+                    _ => {}
+                },
                 Err(err) => match err {
                     mpsc::error::TryRecvError::Empty => {}
                     _ => {
-                        log::info!("Failed to receive message: {:?}", err);
+                        log::error!("Failed to receive message: {:?}", err);
                     }
                 },
             };
@@ -179,27 +201,14 @@ impl Screen {
         //};
 
         //let markdown = termimad::inline(&self.output.content);
-        if !self.messages.is_empty() {
-            let skin = MadSkin::default();
-            let area = Area::new(0, 0, self.screen_width, self.screen_height);
 
-            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
+        if !self.messages.is_empty() {
             for msg in self.messages.iter() {
-                //match msg.role {
-                //    MessageRole::User => {}
-                //    MessageRole::Assistant => {}
-                //    _ => {}
-                //}
-                //let fmt_text = FmtText::from(&skin, &msg.content, Some(area.width as usize));
-                //let rendered = fmt_text.to_string();
-                //let rendered = skin
-                //    .text(&msg.content, Some(self.screen_width as usize))
-                //    .to_string();
                 let lines = render_markdown(&msg.content, self.screen_width as usize);
                 for line in &lines {
                     queue!(stdout, Print(line), Print("\r\n"))?;
                 }
-                log::info!("content_heighT: {}", self.content_height);
+                //log::info!("content_heighT: {}", self.content_height);
             }
             self.content_height = self
                 .messages
@@ -207,6 +216,16 @@ impl Screen {
                 .map(|m| render_markdown(&m.content, self.screen_width as usize).len() as u16)
                 .sum::<u16>()
                 + 1;
+        }
+        if self.is_streaming {
+            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
+
+            let lines = render_markdown(&self.output.content, self.screen_width as usize);
+            for line in &lines {
+                queue!(stdout, Print(line), Print("\r\n"))?;
+            }
+            //log::info!("content_heighT: {}", self.content_height);
+            self.content_height = lines.len() as u16 + 1;
         }
         Ok(())
     }
@@ -229,14 +248,21 @@ impl Screen {
     fn draw_status_bar(&self, stdout: &mut impl Write) -> Result<()> {
         let text = "Last synced: 3 minutes ago.";
 
+        let status = match self.prompt_state {
+            PromptState::Enter => "Searching...".to_string().yellow(),
+            PromptState::Done => "Done.".to_string().green(),
+            PromptState::Generating => "Generating...".to_string().magenta(),
+            PromptState::None => text.to_string().blue(),
+        };
         queue!(
             stdout,
             cursor::MoveTo(
                 self.screen_width - 1 - text.len() as u16,
                 self.screen_height - 1
             ),
-            PrintStyledContent(text.blue())
+            PrintStyledContent(status)
         )?;
+
         Ok(())
     }
 
@@ -244,7 +270,6 @@ impl Screen {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.ui_offset += 2;
-                log::info!("mouse: {}", self.ui_offset);
             }
             MouseEventKind::ScrollDown => {
                 self.ui_offset = self.ui_offset.saturating_sub(2);
@@ -253,7 +278,7 @@ impl Screen {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, tx: &Sender<SearchResult>) -> Action {
+    fn handle_key(&mut self, key: KeyEvent, tx: &Sender<AppEvent>) -> Action {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 return Action::Quit;
@@ -265,16 +290,20 @@ impl Screen {
                 self.prompt_state = PromptState::Enter;
                 let query = self.input.clone();
                 let tx = tx.clone();
+                let msgs = self.messages.clone();
+                self.is_streaming = true;
+
                 tokio::spawn(async move {
+                    log::info!("START SEARCH");
                     // DO LLM CALL
-                    match run_search(query).await {
+                    match run_search(query, &msgs, &tx).await {
                         Ok(result) => {
-                            tx.send(result)
+                            tx.send(AppEvent::SearchResult(result))
                                 .await
                                 .expect("Failed to send query response");
                         }
                         Err(err) => {
-                            log::info!("Failed to run search: {}", err);
+                            log::error!("Failed to run search: {}", err);
                         }
                     };
                 });
@@ -327,19 +356,22 @@ fn is_loading(state: &PromptState) -> bool {
     }
 }
 
-pub async fn run_search(query: String) -> Result<SearchResult> {
-    let model = Model::new("gemma4");
+pub async fn run_search(
+    query: String,
+    messages: &[ChatMessage],
+    tx: &Sender<AppEvent>,
+) -> Result<SearchResult> {
+    let model = Model::new("qwen3.5:27b-q4_K_M");
     let local = LocalDB::new();
 
     let query_embedding = model.embed_query(&query).await?;
     let vector_res = local.search_by_vector(query_embedding, 20).await?;
-    log::info!("vector res: {:?}", vector_res);
 
     let ids = vector_res.iter().map(|row| row.0).collect();
-    log::info!("\nids: {:?}", ids);
     let history_data = local.get_tabs_from_ids(ids).await?;
+    log::info!("FINISHED VECTOR SEARCH");
 
-    log::info!("\nhistory data: {:?}", history_data);
+    //log::info!("\nhistory data: {:?}", history_data);
 
     let history_txt = history_data
         .iter()
@@ -355,13 +387,22 @@ pub async fn run_search(query: String) -> Result<SearchResult> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    log::info!("\nhistory txt: {}", history_txt);
 
     let query_w_data = format!(
         "User query: '{}'\nBrowsing history: {}\n",
         query, history_txt
     );
-    let result = model.search(&query_w_data).await?;
+
+    let tx_token = tx.clone();
+    log::info!("START LLM");
+    let result = model
+        .search(&query_w_data, messages, move |token| {
+            let tx = tx_token.clone();
+            async move {
+                tx.send(AppEvent::Token(token)).await.ok();
+            }
+        })
+        .await?;
 
     Ok(result)
 }

@@ -23,13 +23,10 @@ async fn main() -> Result<()> {
     init_logging();
     let _guard = TerminalGuard;
 
-    let model = Model::new("gemma4");
-
-    let mut browser = Browser::new();
-
     let mut screen = Screen::new();
     screen.draw()?;
 
+    let mut browser = Browser::new();
     let mut local = LocalDB::new();
 
     local.init_db()?;
@@ -53,6 +50,8 @@ async fn main() -> Result<()> {
 
     let filtered_tabs = filter_tabs(new_tabs);
 
+    let model = Model::new("gemma4");
+
     // Embed new tabs for saving
     let embedded = model.embed_tabs(&filtered_tabs).await?;
     println!("Inserting {} tabs", filtered_tabs.len());
@@ -60,12 +59,6 @@ async fn main() -> Result<()> {
 
     // Save new tabs in vector DB
     local.save_new_tabs(&embedded, &filtered_tabs)?;
-
-    // Update state to ready
-
-    //for i in (browser.history.len() - 100)..browser.history.len() {
-    //    println!("{:?}", browser.history[i])
-    //}
 
     Ok(())
 }
