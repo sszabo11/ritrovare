@@ -19,6 +19,10 @@ pub struct Model {
 
 const SYSTEM_PROMPT: &str = "You are Ritrovare, a personal browsing history assistant. The user has given you a list of pages they've previously read, with titles, URLs, visit counts, and timestamps. Answer their question using only this history — don't use outside knowledge. Be concise, reference specific pages by title when relevant, and if nothing in the history is relevant, say so plainly. Respond in markdown format.";
 
+fn build_system_prompt() -> String {
+    format!("/no_think\n\n{}", SYSTEM_PROMPT)
+}
+
 impl Model {
     pub fn new(model_name: &str) -> Self {
         Self {
@@ -33,10 +37,8 @@ impl Model {
         prev_messages: &[ChatMessage],
         on_token: impl AsyncFn(String),
     ) -> Result<SearchResult> {
-        let mut all_messages: Vec<ChatMessage> = vec![ChatMessage::new(
-            MessageRole::System,
-            SYSTEM_PROMPT.to_string(),
-        )];
+        let mut all_messages: Vec<ChatMessage> =
+            vec![ChatMessage::new(MessageRole::System, build_system_prompt())];
         all_messages.extend_from_slice(prev_messages);
         all_messages.push(ChatMessage::new(MessageRole::User, query.to_string()));
 

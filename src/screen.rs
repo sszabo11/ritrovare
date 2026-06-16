@@ -60,6 +60,7 @@ pub enum AppEvent {
     Done,
     SearchResult(SearchResult),
     Error(String),
+    StartStreaming,
 }
 
 #[derive(Debug)]
@@ -100,7 +101,7 @@ impl Screen {
         execute!(stdout, EnableMouseCapture)?;
         execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
 
-        let (tx, mut rx) = mpsc::channel::<AppEvent>(100);
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(300);
         loop {
             self.render(&mut stdout)?;
             if event::poll(Duration::from_millis(80))? {
@@ -124,12 +125,14 @@ impl Screen {
                 // if is_streaming doesnt work, add evebt START here:
                 Ok(event) => match event {
                     AppEvent::Token(token) => {
+                        log::info!("TOKEN: {}", token);
                         self.output.content.push_str(&token);
+                    }
+                    AppEvent::StartStreaming => {
+                        self.is_streaming = true;
                     }
                     AppEvent::SearchResult(result) => {
                         self.prompt_state = PromptState::None;
-                        self.messages
-                            .push(ChatMessage::new(MessageRole::User, self.input.to_string()));
                         self.input.clear();
                         self.messages
                             .push(ChatMessage::new(MessageRole::Assistant, result.content));
@@ -171,7 +174,7 @@ impl Screen {
     }
 
     fn draw_input(&mut self, stdout: &mut impl Write) -> Result<()> {
-        let input_y = 6 + self.ui_offset + self.content_height;
+        let input_y = 6 + self.content_height + self.ui_offset;
 
         if is_loading(&self.prompt_state) {
             let frame = self.spinner.tick();
@@ -202,30 +205,33 @@ impl Screen {
 
         //let markdown = termimad::inline(&self.output.content);
 
-        if !self.messages.is_empty() {
-            for msg in self.messages.iter() {
-                let lines = render_markdown(&msg.content, self.screen_width as usize);
-                for line in &lines {
-                    queue!(stdout, Print(line), Print("\r\n"))?;
-                }
-                //log::info!("content_heighT: {}", self.content_height);
-            }
-            self.content_height = self
-                .messages
-                .iter()
-                .map(|m| render_markdown(&m.content, self.screen_width as usize).len() as u16)
-                .sum::<u16>()
-                + 1;
-        }
-        if self.is_streaming {
-            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
-
-            let lines = render_markdown(&self.output.content, self.screen_width as usize);
+        for msg in self.messages.iter() {
+            let padding = if msg.role == MessageRole::User { 0 } else { 5 };
+            let lines = render_markdown(&msg.content, self.screen_width as usize, padding);
             for line in &lines {
                 queue!(stdout, Print(line), Print("\r\n"))?;
             }
             //log::info!("content_heighT: {}", self.content_height);
-            self.content_height = lines.len() as u16 + 1;
+        }
+        self.content_height = (1..self.messages.len())
+            .into_iter()
+            .map(|i| {
+                let m = &self.messages[i];
+                let padding = if m.role == MessageRole::User { 0 } else { 5 };
+
+                render_markdown(&m.content, self.screen_width as usize, padding).len() as u16
+            })
+            .sum::<u16>();
+
+        if self.is_streaming {
+            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
+
+            let lines = render_markdown(&self.output.content, self.screen_width as usize, 5);
+            for line in &lines {
+                queue!(stdout, Print(line), Print("\r\n"))?;
+            }
+            //log::info!("content_heighT: {}", self.content_height);
+            self.content_height = lines.len() as u16;
         }
         Ok(())
     }
@@ -291,7 +297,9 @@ impl Screen {
                 let query = self.input.clone();
                 let tx = tx.clone();
                 let msgs = self.messages.clone();
-                self.is_streaming = true;
+                self.messages
+                    .push(ChatMessage::new(MessageRole::User, self.input.to_string()));
+                self.input.clear();
 
                 tokio::spawn(async move {
                     log::info!("START SEARCH");
@@ -395,6 +403,7 @@ pub async fn run_search(
 
     let tx_token = tx.clone();
     log::info!("START LLM");
+    tx.send(AppEvent::StartStreaming).await?;
     let result = model
         .search(&query_w_data, messages, move |token| {
             let tx = tx_token.clone();
@@ -408,15 +417,14 @@ pub async fn run_search(
 }
 
 fn format_timestamp(micros: i64) -> String {
-    use chrono::{DateTime, Utc};
+    use chrono::DateTime;
     let secs = micros / 1_000_000;
     DateTime::from_timestamp(secs, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn render_markdown(text: &str, terminal_width: usize) -> Vec<String> {
-    let padding = 5;
+fn render_markdown(text: &str, terminal_width: usize, padding: usize) -> Vec<String> {
     let content_width = terminal_width.saturating_sub(padding * 2);
     let mut skin = MadSkin::default();
     skin.paragraph.left_margin = 0;
