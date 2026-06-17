@@ -205,9 +205,23 @@ impl Screen {
 
         //let markdown = termimad::inline(&self.output.content);
 
-        for msg in self.messages.iter() {
+        for (i, msg) in self.messages.iter().enumerate() {
+            let prev_content_height = (0..i)
+                .into_iter()
+                .map(|i| {
+                    let m = &self.messages[i];
+                    let padding = if m.role == MessageRole::User { 0 } else { 5 };
+
+                    render_markdown(&m.content, self.screen_width as usize, padding).len() as u16
+                })
+                .sum::<u16>();
+
             let padding = if msg.role == MessageRole::User { 0 } else { 5 };
-            let lines = render_markdown(&msg.content, self.screen_width as usize, padding);
+            queue!(
+                stdout,
+                cursor::MoveTo(5, 6 + prev_content_height + self.ui_offset)
+            )?;
+            let lines = render_markdown(&msg.content, self.screen_width as usize, padding as usize);
             for line in &lines {
                 queue!(stdout, Print(line), Print("\r\n"))?;
             }
@@ -223,8 +237,20 @@ impl Screen {
             })
             .sum::<u16>();
 
+        let prev_content_height = (0..self.messages.len())
+            .into_iter()
+            .map(|i| {
+                let m = &self.messages[i];
+                let padding = if m.role == MessageRole::User { 0 } else { 5 };
+
+                render_markdown(&m.content, self.screen_width as usize, padding).len() as u16
+            })
+            .sum::<u16>();
         if self.is_streaming {
-            queue!(stdout, cursor::MoveTo(0, 6 + self.ui_offset))?;
+            queue!(
+                stdout,
+                cursor::MoveTo(0, 6 + prev_content_height + self.ui_offset)
+            )?;
 
             let lines = render_markdown(&self.output.content, self.screen_width as usize, 5);
             for line in &lines {
@@ -373,7 +399,7 @@ pub async fn run_search(
     let local = LocalDB::new();
 
     let query_embedding = model.embed_query(&query).await?;
-    let vector_res = local.search_by_vector(query_embedding, 20).await?;
+    let vector_res = local.search_by_vector(query_embedding, 5).await?;
 
     let ids = vector_res.iter().map(|row| row.0).collect();
     let history_data = local.get_tabs_from_ids(ids).await?;
